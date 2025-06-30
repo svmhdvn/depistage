@@ -8,13 +8,11 @@
 import aiohttp
 import asyncio
 import pathlib
+import itertools
 
 # TODO:
 # * only works for amd64 now
 # * if the same test is failing on multiple archs, file the bug as 'platform = any'
-
-def jenkinsCaseToKyuaFilter(t):
-    return f"{t['className'].replace('.', '/')}:{t['name']}"
 
 async def jenkinsLatestTestRun(session):
     url = '/view/Test/job/FreeBSD-main-amd64-test/lastCompletedBuild/testReport/api/json'
@@ -31,66 +29,65 @@ async def jenkinsBuildMetadataKv(session, build_num):
 
 async def fetchJenkinsData(session):
     j = await jenkinsLatestTestRun(session)
-    failed_tests = [
-        {'name': jenkinsCaseToKyuaFilter(t), 'failedSince': t['failedSince']
-        for t in j if t['failedSince'] > 0
-    ]
+    failed_tests = [t for t in j if t['failedSince'] > 0]
     unique_failed_since = frozenset(t['failedSince'] for t in failed_tests)
     buildnum_to_metadata = dict(await asyncio.gather(*(jenkinsBuildMetadataKv(session, bn) for bn in unique_failed_since)))
-    return {'failed_tests': failed_tests, 'past_builds': buildnum_to_metadata}
+    kf = lambda t: t['className']
+    failed_kyua_suites = [{'name': k, 'cases': list(v)} for k, v in itertools.groupby(sorted(failed_tests, key=kf), key=kf)]
+    return {'failed_kyua_suites': failed_kyua_suites, 'past_builds': buildnum_to_metadata}
 
 async def bugzillaSearchExistingBugs(session, api_key):
     url = '/bugzilla/rest/bug'
-    params = {'api_key': api_key,'keywords': 'ci'}
+    params = {
+        'api_key': api_key,
+        'keywords': 'ci',
+        'status': ['New', 'Open', 'In Progress'],
+    }
     async with session.get(url, params=params) as resp:
+        return (await resp.json())['bugs']
+
+async def bugzillaFileBug(session, api_key, jenkins_data, suite):
+    url = '/bugzilla/rest/bug'
+    params = {
+        'api_key': api_key,
+        'keywords': 'ci',
+        'status': ['New', 'Open', 'In Progress'],
+    }
+    async with session.post(url, json=params) as resp:
         return (await resp.json())['bugs']
 
 async def fetchBugzillaData(session, api_key):
     existing_bugs = await bugzillaSearchExistingBugs(session, api_key)
     return {'existing_bugs': existing_bugs}
 
-async def bugzillaReopenClosedBug(session):
-    pass
+async def triageFailingKyuaSuite(session, bugzilla_data, jenkins_data, suite):
+    for b in bugzilla_data['existing_bugs']:
+        if suite['name'] in b['summary']:
+            return
 
-async def bugzillaFileNewBug(session):
-    pass
+    print(f"need to file: {suite['name']}\tcases: {suite['cases']}")
 
-async def main():
+
+async def asyncMain():
     api_key = pathlib.Path('/home/siva/src/playground/bugstest_apikey.txt').read_text()
 
     # TODO change to production bugzilla URL once ready
-    async with
+    async with (
         aiohttp.ClientSession('https://ci.freebsd.org') as jenkins_session,
-        aiohttp.ClientSession('https://bugstest.freebsd.org') as bugzilla_session:
+        aiohttp.ClientSession('https://bugstest.freebsd.org') as bugzilla_session
+    ):
 
         jenkins_data, bugzilla_data = await asyncio.gather(
             fetchJenkinsData(jenkins_session),
             fetchBugzillaData(bugzilla_session, api_key),
         )
 
-        # convert Jenkins-style test names to Kyua-style test filters
-        failing_case_names = [t['name'] for t in jenkins_data['failed_tests']]
-        print(failing_case_names)
-        print()
+        await asyncio.gather(*(
+            triageFailingKyuaSuite(bugzilla_session, bugzilla_data, jenkins_data, s)
+            for s in jenkins_data['failed_kyua_suites']
+        ))
 
-        for t in jenkins_data['failed_tests']:
-            test_found = False
-            for b in bugzilla_data['existing_bugs']:
-                if t['name'] not in b['summary']: continue
+def main():
+    asyncio.run(asyncMain())
 
-                test_found = True
-                # already being tracked, no-op
-                if b['status'] != 'Closed': continue
-
-                # TODO reopen the previous bug to preserve
-                # prior discussion and history
-                bugzillaReopenClosedBug(bugzilla_session)
-
-            if not test_found:
-                # TODO file a new bug
-                bugzillaFileNewBug(bugzilla_session)
-
-def run():
-    asyncio.run(main())
-
-run()
+main()
