@@ -1,9 +1,4 @@
-# /// script
-# requires-python = ">=3.8"
-# dependencies = [
-#     "aiohttp[speedups]"
-# ]
-# ///
+#!/usr/bin/env python
 
 import aiohttp
 import asyncio
@@ -59,6 +54,22 @@ async def bugzillaFileBug(session, api_key, jenkins_data, suite):
 async def fetchBugzillaData(session, api_key):
     existing_bugs = await bugzillaSearchExistingBugs(session, api_key)
     return {'existing_bugs': existing_bugs}
+
+def bugTemplate(jenkins_last_failing, suite):
+    return f"""
+The '{suite["name"]}' test suite is failing in FreeBSD CI for the past {TODO} builds.
+
+First noticed regression:
+https://ci.freebsd.org/view/Test/job/FreeBSD-main-amd64-test/{TODO}/
+
+Most recent failure:
+https://ci.freebsd.org/view/Test/job/FreeBSD-main-amd64-test/{TODO}/
+
+Probable root cause identified by CI:
+https://cgit.freebsd.org/src/commit/?id={TODO}
+
+@{TODO} please triage as necessary.
+    """
 
 async def triageFailingKyuaSuite(session, bugzilla_data, jenkins_data, suite):
     for b in bugzilla_data['existing_bugs']:
